@@ -10,6 +10,7 @@ from .domain import (
     InvalidTransition,
     NotFoundError,
     PermissionDenied,
+    RecoveryBlocked,
     ValidationError,
 )
 
@@ -70,7 +71,7 @@ def create_handler(service, rules, static_dir):
                 status = 400
             else:
                 status = 500
-            self._send(status, {"error": str(exc), "type": type(exc).__name__})
+            self._send(status, {"error": str(exc), "type": type(exc).__name__, **({"blockers": exc.blockers} if isinstance(exc, RecoveryBlocked) else {})})
 
         def do_GET(self):
             try:
@@ -84,6 +85,12 @@ def create_handler(service, rules, static_dir):
                         return self._send_html(200, handle.read())
                 if parts == ["api", "audit"]:
                     return self._send(200, {"items": service.audit_log()})
+                if parts == ["api", "rescue-queue"]:
+                    return self._send(200, {"items": service.rescue_queue()})
+                if parts == ["api", "isolation"]:
+                    return self._send(200, service.isolation_overview())
+                if len(parts) == 4 and parts[:2] == ["api", "offline-records"] and parts[3] == "versions":
+                    return self._send(200, service.offline_versions(parts[2]))
                 if len(parts) == 3 and parts[:2] == ["api", "entities"]:
                     return self._send(200, service.get(parts[2]))
                 if len(parts) >= 2 and parts[0] == "api" and parts[1] != "entities":
@@ -103,7 +110,8 @@ def create_handler(service, rules, static_dir):
                 actor = self._actor()
                 if parts == ["api", "offline-records"]:
                     body = self._body()
-                    return self._send(200, {"items": service.merge_offline(actor, body.get("records", []))})
+                    request_id = body.get("request_id") or self.headers.get("X-Request-Id")
+                    return self._send(200, service.merge_offline(actor, body.get("records", []), request_id))
                 if len(parts) == 3 and parts[:2] == ["api", "entities"]:
                     body = self._body()
                     action = body.pop("action", None)

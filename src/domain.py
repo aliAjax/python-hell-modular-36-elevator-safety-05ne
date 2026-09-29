@@ -27,6 +27,14 @@ class InvalidTransition(DomainError):
     """The requested state transition is not valid."""
 
 
+class RecoveryBlocked(ConflictError):
+    """Group recovery cannot proceed because at least one unit has blockers."""
+
+    def __init__(self, message, blockers=None):
+        super().__init__(message)
+        self.blockers = blockers or {}
+
+
 class Role(str, Enum):
     viewer = "viewer"
     admin = "admin"

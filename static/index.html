@@ -1,11 +1,90 @@
 <!doctype html>
 <html lang="zh-CN">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>电梯与自动扶梯巡检和事件响应</title>
-<style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:2rem;color:#1f2937}main{max-width:860px;margin:auto}pre{background:#f3f4f6;padding:1rem;border-radius:8px;overflow-x:auto}button{padding:.5rem .8rem;cursor:pointer}</style></head>
-<body><main><h1>电梯与自动扶梯巡检和事件响应</h1><p>这是最小演示页面，主要操作通过JSON API完成。</p><p><button onclick="checkHealth()">检查服务状态</button></p><pre id="result">等待操作</pre>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:1.5rem;color:#1f2937}
+main{max-width:960px;margin:auto}
+h1{font-size:1.4rem}h2{font-size:1.1rem;margin-top:2rem}
+button{padding:.45rem .8rem;cursor:pointer;border-radius:6px;border:1px solid #9ca3af;background:#fff}
+.card{border:1px solid #e5e7eb;border-radius:10px;padding:1rem;margin:.8rem 0;background:#fff}
+.scope{display:inline-block;padding:.1rem .55rem;border-radius:999px;font-size:.78rem;margin-right:.4rem}
+.severe{background:#fee2e2;color:#991b1b}.normal{background:#dbeafe;color:#1e3a8a}
+.unit{border-top:1px dashed #e5e7eb;padding:.6rem 0}.unit:first-child{border-top:none}
+.tag{display:inline-block;background:#f3f4f6;border-radius:6px;padding:.05rem .45rem;margin:.15rem .3rem .15rem 0;font-size:.82rem}
+.blocker{background:#fef3c7;border:1px solid #fde68a;border-radius:6px;padding:.25rem .55rem;margin:.2rem .3rem .2rem 0;display:inline-block;font-size:.82rem}
+.ok{color:#166534;font-size:.85rem}
+.muted{color:#6b7280;font-size:.82rem}
+table{border-collapse:collapse;width:100%;font-size:.85rem}
+th,td{border-bottom:1px solid #e5e7eb;padding:.4rem .5rem;text-align:left}
+#result{background:#f3f4f6;padding:1rem;border-radius:8px;overflow-x:auto}
+</style></head>
+<body><main>
+<h1>电梯与自动扶梯巡检和事件响应</h1>
+<p>
+  <button onclick="checkHealth()">检查服务状态</button>
+  <button onclick="loadAll()">刷新停梯范围与救援队列</button>
+</p>
+<h2>当前停梯范围与恢复阻碍</h2>
+<div id="isolation" class="muted">点击“刷新停梯范围与救援队列”加载。</div>
+<h2>救援队列（严重任务优先，其次按到场时间）</h2>
+<div id="queue" class="muted"></div>
+<h2>服务状态</h2>
+<pre id="result">等待操作</pre>
 <h2>常用接口</h2><pre>GET  /health
 GET  /api/&lt;kind&gt;
 POST /api/&lt;kind&gt;
 GET  /api/entities/&lt;id&gt;
-POST /api/entities/&lt;id&gt;/actions</pre></main>
-<script>async function checkHealth(){const r=await fetch('/health');document.getElementById('result').textContent=JSON.stringify(await r.json(),null,2)}</script></body></html>
+POST /api/entities/&lt;id&gt;/actions
+GET  /api/isolation                       # 停梯范围与逐台恢复阻碍
+GET  /api/rescue-queue                    # 救援任务排队
+POST /api/offline-records                 # 离线巡检按版本合并（支持 X-Request-Id）
+GET  /api/offline-records/&lt;record_id&gt;/versions  # 旧版本可查</pre>
+</main>
+<script>
+const BLOCKER_TEXT = {
+  active_alarm: '存在未关闭报警',
+  open_remediation: '整改未关闭',
+  missing_reinspection: '缺少隔离后的复检合格记录',
+  missing_equipment: '设备不存在'
+};
+async function getJson(url){const r=await fetch(url);return r.json();}
+async function checkHealth(){const d=await getJson('/health');document.getElementById('result').textContent=JSON.stringify(d,null,2);}
+function esc(s){return String(s==null?'':s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+function blockerTags(blockers){
+  if(!blockers||!blockers.length)return '<span class="ok">✓ 无阻碍，可恢复</span>';
+  return blockers.map(b=>{
+    const detail=b.remediation_id?(' '+b.remediation_id):b.alarm_id?(' '+b.alarm_id):'';
+    return '<span class="blocker">'+esc(BLOCKER_TEXT[b.type]||b.type)+esc(detail)+'</span>';
+  }).join('');
+}
+async function loadIsolation(){
+  const data=await getJson('/api/isolation');
+  const box=document.getElementById('isolation');
+  if(!data.items.length){box.innerHTML='<div class="card ok">当前没有进行中的停梯隔离。</div>';return;}
+  box.innerHTML=data.items.map(a=>{
+    const units=a.units.map(u=>'<div class="unit">'
+      +'<strong>'+esc(u.asset_no||u.equipment_id)+'</strong> '
+      +'<span class="tag">状态 '+esc(u.status)+'</span>'
+      +(u.group_id?'<span class="tag">群组 '+esc(u.group_id)+'</span>':'')
+      +'<div style="margin-top:.3rem">'+blockerTags(u.blockers)+'</div>'
+      +'</div>').join('');
+    return '<div class="card"><div>'
+      +'<span class="scope '+(a.severity==='severe'?'severe':'normal')+'">'+(a.severity==='severe'?'严重报警':'普通报警')+'</span>'
+      +'<strong>报警 '+esc(a.alarm_id)+'</strong> '
+      +'<span class="tag">故障码 '+esc(a.code)+'</span>'
+      +'<span class="tag">报警状态 '+esc(a.status)+'</span>'
+      +'<span class="tag">范围 '+esc(a.scope_kind==='group'?'整组':(a.scope_kind==='explicit'?'指定范围':'单台'))+' · '+a.scope_equipment_ids.length+' 台</span>'
+      +'</div>'+units+'</div>';
+  }).join('');
+}
+async function loadQueue(){
+  const data=await getJson('/api/rescue-queue');
+  const box=document.getElementById('queue');
+  if(!data.items.length){box.innerHTML='<div class="muted">当前没有排队中的救援任务。</div>';return;}
+  box.innerHTML='<table><thead><tr><th>#</th><th>严重</th><th>状态</th><th>到场/预计到场</th><th>队伍</th></tr></thead><tbody>'
+    +data.items.map((j,i)=>'<tr><td>'+(i+1)+'</td><td>'+(j.data.severity==='severe'?'<span class="scope severe">严重</span>':'')+'</td><td>'+esc(j.status)+'</td><td>'+esc(j.data.arrived_at||j.data.eta||'')+'</td><td>'+esc(j.data.team)+'</td></tr>').join('')
+    +'</tbody></table>';
+}
+function loadAll(){loadIsolation();loadQueue();}
+loadAll();
+</script></body></html>

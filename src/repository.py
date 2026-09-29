@@ -54,6 +54,12 @@ class SQLiteRepository:
                     created_at TEXT NOT NULL,
                     PRIMARY KEY(actor_id, idem_key)
                 );
+                CREATE TABLE IF NOT EXISTS merge_requests (
+                    request_id TEXT PRIMARY KEY,
+                    actor_id TEXT NOT NULL,
+                    response TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
             """)
 
     @staticmethod
@@ -198,6 +204,92 @@ class SQLiteRepository:
                 "VALUES (?, ?, ?, ?)",
                 (actor_id, idem_key, entity_id, utcnow()),
             )
+
+    def save_batch(self, inserts=None, updates=None, audits=None, merge_request=None):
+        """Apply several entity changes and audit rows in one transaction.
+
+        inserts: list of dicts with id/kind/status/data/created_by.
+        updates: list of (entity_id, expected_version, status, data).
+        audits:  list of audit kwargs for append_audit.
+        merge_request: optional (request_id, actor_id, response_dict).
+        Returns {"inserted": {id: entity}, "updated": {id: entity}}.
+        Raises ConflictError on a version mismatch; nothing is persisted.
+        """
+        inserts = inserts or []
+        updates = updates or []
+        audits = audits or []
+        now = utcnow()
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            for insert in inserts:
+                payload = json.dumps(insert["data"], ensure_ascii=False, sort_keys=True)
+                connection.execute(
+                    "INSERT INTO entities(id, kind, status, version, data, created_by, created_at, updated_at) "
+                    "VALUES (?, ?, ?, 1, ?, ?, ?, ?)",
+                    (insert["id"], insert["kind"], insert["status"], payload, insert["created_by"], now, now),
+                )
+            for entity_id, expected_version, status, data in updates:
+                row = connection.execute(
+                    "SELECT version FROM entities WHERE id = ?", (entity_id,)
+                ).fetchone()
+                if not row:
+                    raise NotFoundError("entity not found: " + entity_id)
+                current_version = int(row["version"])
+                if expected_version is not None and current_version != int(expected_version):
+                    raise ConflictError(
+                        "version conflict: expected %s, found %s"
+                        % (expected_version, current_version)
+                    )
+                payload = json.dumps(data, ensure_ascii=False, sort_keys=True)
+                connection.execute(
+                    "UPDATE entities SET status = ?, version = version + 1, data = ?, updated_at = ? "
+                    "WHERE id = ? AND version = ?",
+                    (status, payload, now, entity_id, current_version),
+                )
+            for entry in audits:
+                connection.execute(
+                    "INSERT INTO audit_log(entity_id, actor_id, actor_role, action, from_status, to_status, detail, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        entry["entity_id"],
+                        entry["actor_id"],
+                        entry["actor_role"],
+                        entry["action"],
+                        entry.get("from_status"),
+                        entry["to_status"],
+                        json.dumps(entry.get("detail", {}), ensure_ascii=False, sort_keys=True),
+                        now,
+                    ),
+                )
+            if merge_request:
+                request_id, actor_id, response = merge_request
+                connection.execute(
+                    "INSERT INTO merge_requests(request_id, actor_id, response, created_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (request_id, actor_id, json.dumps(response, ensure_ascii=False, sort_keys=True), now),
+                )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        result = {"inserted": {}, "updated": {}}
+        for insert in inserts:
+            result["inserted"][insert["id"]] = self.get_entity(insert["id"])
+        for entity_id, _, _, _ in updates:
+            result["updated"][entity_id] = self.get_entity(entity_id)
+        return result
+
+    def get_merge_request(self, request_id):
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT actor_id, response FROM merge_requests WHERE request_id = ?", (request_id,)
+            ).fetchone()
+        if not row:
+            return None
+        return {"actor_id": row["actor_id"], "response": json.loads(row["response"])}
 
     def ping(self):
         with self._connect() as connection:
