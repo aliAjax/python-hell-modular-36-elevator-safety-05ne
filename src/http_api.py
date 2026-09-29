@@ -84,6 +84,21 @@ def create_handler(service, rules, static_dir):
                         return self._send_html(200, handle.read())
                 if parts == ["api", "audit"]:
                     return self._send(200, {"items": service.audit_log()})
+                if parts == ["api", "rescue-queue"]:
+                    return self._send(200, {"items": service.rescue_queue()})
+                if parts == ["api", "recovery-board"]:
+                    return self._send(200, {"items": service.recovery_board()})
+                if parts == ["api", "offline-records", "versions"]:
+                    query = parse_qs(parsed.query)
+                    return self._send(
+                        200,
+                        {
+                            "items": service.offline_record_versions(
+                                source_id=query.get("source_id", [None])[0],
+                                record_id=query.get("record_id", [None])[0],
+                            )
+                        },
+                    )
                 if len(parts) == 3 and parts[:2] == ["api", "entities"]:
                     return self._send(200, service.get(parts[2]))
                 if len(parts) >= 2 and parts[0] == "api" and parts[1] != "entities":

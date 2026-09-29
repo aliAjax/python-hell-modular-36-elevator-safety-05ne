@@ -1,11 +1,52 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>电梯与自动扶梯巡检和事件响应</title>
-<style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:2rem;color:#1f2937}main{max-width:860px;margin:auto}pre{background:#f3f4f6;padding:1rem;border-radius:8px;overflow-x:auto}button{padding:.5rem .8rem;cursor:pointer}</style></head>
-<body><main><h1>电梯与自动扶梯巡检和事件响应</h1><p>这是最小演示页面，主要操作通过JSON API完成。</p><p><button onclick="checkHealth()">检查服务状态</button></p><pre id="result">等待操作</pre>
-<h2>常用接口</h2><pre>GET  /health
-GET  /api/&lt;kind&gt;
-POST /api/&lt;kind&gt;
-GET  /api/entities/&lt;id&gt;
-POST /api/entities/&lt;id&gt;/actions</pre></main>
-<script>async function checkHealth(){const r=await fetch('/health');document.getElementById('result').textContent=JSON.stringify(await r.json(),null,2)}</script></body></html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>电梯群组隔离与恢复</title>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:2rem;color:#1f2937}main{max-width:980px;margin:auto}
+pre{background:#f3f4f6;padding:1rem;border-radius:8px;overflow-x:auto}button{padding:.5rem .8rem;cursor:pointer;margin-right:.5rem}
+.card{border:1px solid #e5e7eb;border-radius:8px;padding:1rem;margin:1rem 0}
+.badge{display:inline-block;padding:.1rem .5rem;border-radius:999px;font-size:.8rem;margin-right:.3rem}
+.severe{background:#fee2e2;color:#991b1b}.ok{background:#dcfce7;color:#166534}.wait{background:#fef3c7;color:#92400e}
+.blocker{color:#991b1b}.scope{font-family:ui-monospace,Menlo,monospace;font-size:.85rem}
+h2{margin-top:2rem}
+</style></head>
+<body><main>
+<h1>电梯群组隔离与恢复</h1>
+<p>困人严重报警按群组划定停梯范围；许可、维保与复检联动；恢复逐台核对报警、整改、检验并留快照。</p>
+<p>
+<button onclick="loadBoard()">恢复看板（停梯范围与阻碍）</button>
+<button onclick="loadQueue()">救援任务队列</button>
+<button onclick="checkHealth()">服务状态</button>
+</p>
+<div id="board"></div>
+<pre id="result">等待操作</pre>
+<h2>常用接口</h2><pre>GET  /api/recovery-board      停梯范围、每台阻碍与恢复快照
+GET  /api/rescue-queue        按到场时间排序，严重任务插队
+POST /api/alarms              {"severity":"severe",...} 触发群组隔离
+POST /api/offline-records     版本化离线合并（重放幂等）
+GET  /api/offline-records/versions?source_id=...&record_id=...</pre>
+</main>
+<script>
+async function checkHealth(){const r=await fetch('/health');document.getElementById('result').textContent=JSON.stringify(await r.json(),null,2)}
+async function loadQueue(){
+  const r=await fetch('/api/rescue-queue');const data=await r.json();
+  document.getElementById('result').textContent=JSON.stringify(data,null,2);
+}
+async function loadBoard(){
+  const r=await fetch('/api/recovery-board');const data=await r.json();
+  const root=document.getElementById('board');
+  if(!data.items||!data.items.length){root.innerHTML='<div class="card">当前没有群组隔离记录。</div>';return;}
+  root.innerHTML=data.items.map(iso=>{
+    const severe=iso.severity==='severe';
+    const units=iso.units.map(u=>{
+      const tags=u.blockers.map(b=>'<div class="blocker">⛔ '+b.type+'：'+b.message+'</div>').join('');
+      const state=u.returned?'<span class="badge ok">已恢复</span>':(u.ready?'<span class="badge ok">可恢复</span>':'<span class="badge wait">停梯中</span>');
+      const snap=u.recovery_snapshot?'<div>✅ 恢复快照已留存（permit '+(u.recovery_snapshot.permit_id||'无')+'）</div>':'';
+      return '<div style="margin:.6rem 0"><strong>'+u.equipment_id+'</strong> '+state+'<div class="scope">状态：'+u.status+'</div>'+tags+snap+'</div>';
+    }).join('');
+    return '<div class="card"><h3>'+(severe?'<span class="badge severe">严重报警</span>':'')+iso.alarm_id+' <small>隔离单 '+iso.isolation_id+' · '+iso.status+' · 报警 '+iso.alarm_status+'</small></h3>'
+      +'<div>停梯范围：<span class="scope">'+iso.scope.join(', ')+'</span></div>'+units+'</div>';
+  }).join('');
+}
+loadBoard();
+</script></body></html>

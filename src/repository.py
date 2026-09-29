@@ -143,6 +143,114 @@ class SQLiteRepository:
             connection.close()
         return self.get_entity(entity_id)
 
+    def system_update(self, entity_id, status, data):
+        """Apply a cascade side effect without an optimistic version check.
+
+        Cascade updates run inside one orchestration step; callers are trusted
+        internal use cases, not API clients, and each change is still audited.
+        """
+        return self.update_entity(entity_id, None, status, data)
+
+    def upsert_offline_record(self, entity_id, payload):
+        """Atomically merge a versioned offline record.
+
+        Returns (entity, outcome) where outcome is one of:
+        "created", "updated", "duplicate", "superseded", "equipment_conflict".
+        The whole read/merge/write happens in one transaction so the same
+        request replayed after a restart or on another instance cannot change
+        equipment readings twice.
+        """
+        now = utcnow()
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT status, version, data FROM entities WHERE id = ?", (entity_id,)
+            ).fetchone()
+            incoming_version = int(payload["version"])
+            if row:
+                current = {
+                    "status": row["status"],
+                    "version": int(row["version"]),
+                    "data": json.loads(row["data"]),
+                }
+                stored_version = int(current["data"].get("version", 1))
+                if incoming_version == stored_version:
+                    outcome = "duplicate"
+                elif incoming_version < stored_version:
+                    outcome = "superseded"
+                else:
+                    applied_readings = self._apply_offline_readings(connection, current, payload, now)
+                    if applied_readings is None:
+                        connection.rollback()
+                        return self.get_entity(entity_id), "equipment_conflict"
+                    merged = dict(current["data"])
+                    merged.update(payload)
+                    merged["version"] = incoming_version
+                    merged["applied"] = True
+                    merged["updated_at_offline"] = now
+                    connection.execute(
+                        "UPDATE entities SET status = ?, version = version + 1, data = ?, updated_at = ? "
+                        "WHERE id = ?",
+                        (current["status"], json.dumps(merged, ensure_ascii=False, sort_keys=True), now, entity_id),
+                    )
+                    outcome = "updated"
+                connection.commit()
+            else:
+                stored_payload = dict(payload)
+                stored_payload["applied"] = bool(stored_payload.get("readings"))
+                self._apply_offline_readings(connection, None, payload, now)
+                connection.execute(
+                    "INSERT INTO entities(id, kind, status, version, data, created_by, created_at, updated_at) "
+                    "VALUES (?, ?, 'merged', 1, ?, 'offline', ?, ?)",
+                    (
+                        entity_id,
+                        "offline_record",
+                        json.dumps(stored_payload, ensure_ascii=False, sort_keys=True),
+                        now,
+                        now,
+                    ),
+                )
+                outcome = "created"
+                connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        return self.get_entity(entity_id), outcome
+
+    @staticmethod
+    def _apply_offline_readings(connection, current_record, payload, now):
+        readings = payload.get("readings")
+        equipment_id = payload.get("equipment_id")
+        if not readings or not equipment_id:
+            return True
+        row = connection.execute(
+            "SELECT version, data FROM entities WHERE id = ? AND kind = 'equipment'",
+            (equipment_id,),
+        ).fetchone()
+        if not row:
+            return None
+        equipment_data = json.loads(row["data"])
+        offline_fields = equipment_data.get("offline_fields", {})
+        incoming_marker = {"source_id": payload.get("source_id"), "record_id": payload.get("record_id"), "version": int(payload["version"])}
+        for key, value in readings.items():
+            field = offline_fields.get(key)
+            if current_record is None:
+                # First time this record is seen: always apply.
+                offline_fields[key] = {"value": value, "marker": incoming_marker}
+                continue
+            if field and field.get("marker") == incoming_marker:
+                continue  # same request replayed; do not touch equipment twice
+            offline_fields[key] = {"value": value, "marker": incoming_marker}
+        equipment_data["offline_fields"] = offline_fields
+        connection.execute(
+            "UPDATE entities SET data = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(equipment_data, ensure_ascii=False, sort_keys=True), now, equipment_id),
+        )
+        return True
+
     def append_audit(self, entity_id, actor_id, actor_role, action, from_status, to_status, detail):
         with self._connect() as connection:
             connection.execute(
